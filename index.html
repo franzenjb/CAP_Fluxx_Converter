@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAP Fluxx Converter</title>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; }
+h1 { font-size: 24px; margin-bottom: 4px; }
+.subtitle { color: #666; font-size: 14px; margin-bottom: 32px; }
+.card { background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 32px; max-width: 720px; width: 100%; margin-bottom: 24px; }
+.drop-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 48px 24px; text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+.drop-zone:hover, .drop-zone.drag-over { border-color: #d32f2f; background: #fef2f2; }
+.drop-zone input { display: none; }
+.drop-zone p { font-size: 16px; color: #666; }
+.drop-zone .hint { font-size: 12px; color: #999; margin-top: 8px; }
+.badge { display: inline-block; background: #d32f2f; color: #fff; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+#status { display: none; }
+#status.show { display: block; }
+.stats { display: flex; gap: 16px; margin: 16px 0; flex-wrap: wrap; }
+.stat { background: #f5f5f5; border-radius: 6px; padding: 12px 16px; flex: 1; min-width: 120px; }
+.stat .label { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat .value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+.stat .value.red { color: #d32f2f; }
+table.preview { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 16px; }
+table.preview th { background: #f5f5f5; text-align: left; padding: 6px 8px; font-weight: 600; border-bottom: 2px solid #ddd; white-space: nowrap; }
+table.preview td { padding: 6px 8px; border-bottom: 1px solid #eee; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table-wrap { overflow-x: auto; max-height: 300px; overflow-y: auto; }
+.mapping { margin-top: 16px; }
+.mapping h3 { font-size: 14px; margin-bottom: 8px; }
+.map-row { display: flex; align-items: center; padding: 4px 0; font-size: 13px; border-bottom: 1px solid #f0f0f0; }
+.map-row .from { flex: 1; font-weight: 500; }
+.map-row .arrow { color: #999; margin: 0 8px; }
+.map-row .to { flex: 1; color: #666; }
+.map-row.empty .to { color: #ccc; font-style: italic; }
+button.download { display: block; width: 100%; padding: 14px; background: #d32f2f; color: #fff; border: none; border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 20px; transition: background 0.2s; }
+button.download:hover { background: #b71c1c; }
+button.download:disabled { background: #ccc; cursor: default; }
+.section-title { font-size: 14px; font-weight: 600; color: #d32f2f; margin: 16px 0 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+</style>
+</head>
+<body>
+
+<h1>CAP Fluxx Converter</h1>
+<p class="subtitle">Convert Fluxx XLSX partner reports → ArcGIS CSV format</p>
+
+<div class="card">
+  <div class="drop-zone" id="dropZone">
+    <p>Drop Fluxx <span class="badge">XLSX</span> file here or click to browse</p>
+    <p class="hint">fluxx_cap_national_ops_summary_partner_map_*.xlsx</p>
+    <input type="file" id="fileInput" accept=".xlsx,.xls">
+  </div>
+</div>
+
+<div class="card" id="status">
+  <div class="stats">
+    <div class="stat"><div class="label">Rows In</div><div class="value" id="rowsIn">—</div></div>
+    <div class="stat"><div class="label">Rows Out</div><div class="value red" id="rowsOut">—</div></div>
+    <div class="stat"><div class="label">Mapped Fields</div><div class="value" id="mappedCount">—</div></div>
+    <div class="stat"><div class="label">Empty Fields</div><div class="value" id="emptyCount">—</div></div>
+  </div>
+
+  <div class="section-title">Column Mapping</div>
+  <div class="mapping" id="mappingList"></div>
+
+  <div class="section-title">Preview (first 5 rows)</div>
+  <div class="table-wrap" id="previewWrap"></div>
+
+  <button class="download" id="downloadBtn" disabled>Download CAP_2025_Partnerships_IV.csv</button>
+</div>
+
+<script>
+// ---- Column mapping: new XLSX col → required CSV col ----
+const COLUMN_MAP = {
+  'CAP Partner': 'Name',
+  'Street Address': 'Street',
+  'Street Address 2': 'Street2',
+  'City': 'City',
+  'State': 'State',
+  'Postal Code': 'Zip Code',
+  'County': 'Jurisdiction Served',
+  'Primary Focus Area': 'Primary Focus',
+  'Website': 'Website',
+  'Impact': 'Partnership Impact',
+  'Collaboration': 'Collaboration'
+};
+
+// Full required CSV column order
+const CSV_COLUMNS = [
+  'Name','MOU Status','Street','Street2','City','State','Zip Code',
+  'Jurisdiction Served','Website','Partner Contact','Partner Contact Title',
+  'Partner Contact Email','Partner Contact Phone','Primary Focus',
+  'Secondary Focus','Tertiary Focus','Full-Time Staff','Part-Time Staff',
+  'Volunteers','Intent of Partnership','Field Team',
+  'Prepare & Serve Meals At Partner',
+  'Serve Meals At Partner Site Provided By A R C',
+  'Prepare Meals To  Served At ARC Sites',
+  'Serve MobilePartner Meals','Serve Mobile ARC Meals',
+  'Provide Distribute Food at Partner',
+  'Provide Food Boxes For Distribution By A R C',
+  'Distribute Food Boxes Provided By Partner',
+  'Distribute Food Boxes Provided By A R C',
+  'Coordination Of Food-Related Resources',
+  'Provide Health Mental Health Services At Partner',
+  'Provide Health Mental Health Services ARC',
+  'Provide Mobile Health Mental Services',
+  'Support Coordination Of Health Services',
+  'Serve As An Emergency Shelter',
+  'Support Coordination Of Housing Resources',
+  'Provide Site As A Red Cross Point Of Distribution',
+  'Serve As A Point Of Distribution',
+  'Serve As A Warming/Cooling Center','Serve As A Resilience Hub',
+  'Serve As MultiAgency Resource Center',
+  'Provide Facility Red Cross Warehouse','Provide Volunteers To ARC',
+  'Provide Casework Services At Partner','Provide Casework Services',
+  'Language Interpretation','Partnership Impact','Flickr Link',
+  'Video1','Video2','Collaboration','Latitude','Longitude','ObjectId','x','y'
+];
+
+const OUTPUT_FILENAME = 'CAP_2025_Partnerships_IV.csv';
+
+let convertedCSV = null;
+
+// ---- State prefix normalization ----
+function normalizeState(val) {
+  if (!val) return '';
+  const s = String(val).trim();
+  // Already in US-XX format
+  if (/^US-/i.test(s)) return s.toUpperCase();
+  // 2-letter code → US-XX
+  if (/^[A-Z]{2}$/i.test(s)) return 'US-' + s.toUpperCase();
+  return s;
+}
+
+// ---- CSV escape ----
+function csvEscape(val) {
+  if (val == null) return '';
+  const s = String(val);
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+// ---- Process workbook ----
+function processFile(wb) {
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+  const rowsIn = rows.length;
+  const mapped = Object.keys(COLUMN_MAP).length;
+  const empty = CSV_COLUMNS.length - mapped;
+
+  // Build output rows
+  const outRows = rows.map((row, idx) => {
+    const out = {};
+    CSV_COLUMNS.forEach(col => { out[col] = ''; });
+
+    // Apply mapping
+    Object.entries(COLUMN_MAP).forEach(([src, dest]) => {
+      let val = row[src] != null ? row[src] : '';
+      if (dest === 'State') val = normalizeState(val);
+      out[dest] = val;
+    });
+
+    // ObjectId = row number
+    out['ObjectId'] = idx + 1;
+
+    return out;
+  });
+
+  // Build CSV string
+  const header = CSV_COLUMNS.map(csvEscape).join(',');
+  const lines = outRows.map(r => CSV_COLUMNS.map(c => csvEscape(r[c])).join(','));
+  convertedCSV = header + '\n' + lines.join('\n');
+
+  // Update UI
+  document.getElementById('rowsIn').textContent = rowsIn;
+  document.getElementById('rowsOut').textContent = outRows.length;
+  document.getElementById('mappedCount').textContent = mapped;
+  document.getElementById('emptyCount').textContent = empty;
+
+  // Mapping list
+  const mapHTML = CSV_COLUMNS.map(col => {
+    const srcKey = Object.entries(COLUMN_MAP).find(([, v]) => v === col);
+    const hasSource = !!srcKey;
+    return `<div class="map-row${hasSource ? '' : ' empty'}">
+      <span class="from">${hasSource ? srcKey[0] : '—'}</span>
+      <span class="arrow">→</span>
+      <span class="to">${col}</span>
+    </div>`;
+  }).join('');
+  document.getElementById('mappingList').innerHTML = mapHTML;
+
+  // Preview table
+  const previewCols = ['Name','Street','City','State','Zip Code','Primary Focus','Jurisdiction Served'];
+  let thtml = '<table class="preview"><thead><tr>' + previewCols.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+  outRows.slice(0, 5).forEach(r => {
+    thtml += '<tr>' + previewCols.map(c => `<td title="${r[c]}">${r[c]}</td>`).join('') + '</tr>';
+  });
+  thtml += '</tbody></table>';
+  document.getElementById('previewWrap').innerHTML = thtml;
+
+  document.getElementById('status').classList.add('show');
+  document.getElementById('downloadBtn').disabled = false;
+}
+
+// ---- File handling ----
+function handleFile(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const wb = XLSX.read(e.target.result, { type: 'array' });
+    processFile(wb);
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => { if (e.target.files.length) handleFile(e.target.files[0]); });
+
+document.getElementById('downloadBtn').addEventListener('click', () => {
+  if (!convertedCSV) return;
+  const blob = new Blob([convertedCSV], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = OUTPUT_FILENAME;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>
